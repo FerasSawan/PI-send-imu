@@ -4,17 +4,16 @@ Streams real-time IMU orientation (pitch, roll, yaw) and acceleration data over 
 
 ## Setup (on the Pi)
 
-```bash
-sudo apt update && sudo apt install -y python3 python3-pip i2c-tools
-pip3 install smbus2
-```
-
-Enable I2C:
+Clone and run the setup script:
 
 ```bash
-sudo raspi-config
-# Interface Options → I2C → Yes → Finish → Reboot
+git clone https://github.com/FerasSawan/PI-send-imu.git ~/IMU2CV
+cd ~/IMU2CV
+./setup.sh
+sudo reboot
 ```
+
+This installs all dependencies and enables I2C automatically.
 
 ## Send IMU data
 
@@ -42,5 +41,6 @@ Listens on UDP port 9000 by default.
 
 ## Files
 
+- `setup.sh` — installs dependencies and enables I2C
 - `imu_reader.py` — reads the WT901 over I2C and sends UDP packets at 50 Hz
 - `receiver.py` — listens for UDP packets and prints live values
