@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IMU2CV</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f5f0eb;
+    color: #1a1a1a;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+  }
+  .logo { width: 48px; height: 48px; margin-bottom: 8px; }
+  h1 { font-size: 1.4rem; font-weight: 700; letter-spacing: 0.04em; margin-bottom: 32px; }
+
+  .card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 28px 32px;
+    width: 100%;
+    max-width: 420px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    margin-bottom: 20px;
+  }
+  .card h2 {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #888;
+    margin-bottom: 16px;
+  }
+
+  .imu-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px;
+    text-align: center;
+  }
+  .imu-val { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .imu-label { font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
+  .imu-unit { font-size: 0.8rem; font-weight: 400; color: #aaa; }
+
+  .status-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .dot-green { background: #22c55e; }
+  .dot-red { background: #ef4444; }
+  .dot-blue { background: #3b82f6; }
+  .status-text { font-size: 0.82rem; color: #666; }
+
+  .form-row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .form-row input {
+    flex: 1;
+    padding: 10px 14px;
+    border: 1.5px solid #ddd;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.2s;
+    background: #faf8f6;
+  }
+  .form-row input:focus { border-color: #1a1a1a; }
+  .form-row input.port { max-width: 90px; }
+
+  .btn {
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn-start { background: #1a1a1a; color: #fff; }
+  .btn-start:hover { background: #333; }
+  .btn-stop { background: #ef4444; color: #fff; }
+  .btn-stop:hover { background: #dc2626; }
+
+  .sending-bar {
+    margin-top: 16px;
+    display: none;
+    align-items: center;
+    gap: 10px;
+  }
+  .sending-bar.active { display: flex; }
+  .sending-target { font-size: 0.82rem; color: #666; flex: 1; }
+  .sending-anim {
+    display: flex;
+    gap: 3px;
+    align-items: center;
+  }
+  .sending-anim span {
+    width: 4px;
+    height: 14px;
+    background: #3b82f6;
+    border-radius: 2px;
+    animation: pulse 1s ease-in-out infinite;
+  }
+  .sending-anim span:nth-child(2) { animation-delay: 0.15s; }
+  .sending-anim span:nth-child(3) { animation-delay: 0.3s; }
+  .sending-anim span:nth-child(4) { animation-delay: 0.45s; }
+  @keyframes pulse {
+    0%, 100% { transform: scaleY(0.4); opacity: 0.4; }
+    50% { transform: scaleY(1); opacity: 1; }
+  }
+
+  .seq { font-variant-numeric: tabular-nums; font-size: 0.75rem; color: #aaa; margin-top: 8px; text-align: right; }
+</style>
+</head>
+<body>
+
+<img src="/static/actor-logo.png" alt="Actor Labs" class="logo">
+<h1>IMU2CV</h1>
+
+<div class="card">
+  <h2>IMU Data</h2>
+  <div style="margin-bottom: 12px;">
+    <span class="status-dot" id="imuDot"></span>
+    <span class="status-text" id="imuStatus">Checking...</span>
+  </div>
+  <div class="imu-grid">
+    <div><div class="imu-val" id="pitch">0.00</div><div class="imu-label">Pitch <span class="imu-unit">deg</span></div></div>
+    <div><div class="imu-val" id="roll">0.00</div><div class="imu-label">Roll <span class="imu-unit">deg</span></div></div>
+    <div><div class="imu-val" id="yaw">0.00</div><div class="imu-label">Yaw <span class="imu-unit">deg</span></div></div>
+  </div>
+  <div class="imu-grid" style="margin-top: 12px;">
+    <div><div class="imu-val" id="ax">0.00</div><div class="imu-label">AX <span class="imu-unit">g</span></div></div>
+    <div><div class="imu-val" id="ay">0.00</div><div class="imu-label">AY <span class="imu-unit">g</span></div></div>
+    <div><div class="imu-val" id="az">0.00</div><div class="imu-label">AZ <span class="imu-unit">g</span></div></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Send To</h2>
+  <div class="form-row">
+    <input type="text" id="ip" placeholder="192.168.1.68">
+    <input type="number" id="port" class="port" value="9000" min="1" max="65535">
+  </div>
+  <button class="btn btn-start" id="toggleBtn" onclick="toggle()">Start Sending</button>
+  <div class="sending-bar" id="sendingBar">
+    <div class="sending-anim"><span></span><span></span><span></span><span></span></div>
+    <span class="sending-target" id="sendingTarget"></span>
+  </div>
+  <div class="seq" id="seqDisplay"></div>
+</div>
+
+<script>
+let sending = false;
+
+function toggle() {
+  sending ? stop() : start();
+}
+
+async function start() {
+  const ip = document.getElementById("ip").value.trim();
+  const port = document.getElementById("port").value || 9000;
+  if (!ip) { document.getElementById("ip").focus(); return; }
+  await fetch("/api/start", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ip, port})
+  });
+  sending = true;
+  updateUI();
+}
+
+async function stop() {
+  await fetch("/api/stop", {method: "POST"});
+  sending = false;
+  updateUI();
+}
+
+function updateUI() {
+  const btn = document.getElementById("toggleBtn");
+  const bar = document.getElementById("sendingBar");
+  if (sending) {
+    btn.textContent = "Stop";
+    btn.className = "btn btn-stop";
+    bar.classList.add("active");
+    document.getElementById("sendingTarget").textContent =
+      document.getElementById("ip").value + ":" + document.getElementById("port").value;
+  } else {
+    btn.textContent = "Start Sending";
+    btn.className = "btn btn-start";
+    bar.classList.remove("active");
+    document.getElementById("seqDisplay").textContent = "";
+  }
+}
+
+const es = new EventSource("/api/stream");
+es.onmessage = (e) => {
+  const d = JSON.parse(e.data);
+  document.getElementById("pitch").textContent = d.pitch.toFixed(2);
+  document.getElementById("roll").textContent = d.roll.toFixed(2);
+  document.getElementById("yaw").textContent = d.yaw.toFixed(2);
+  document.getElementById("ax").textContent = d.ax.toFixed(2);
+  document.getElementById("ay").textContent = d.ay.toFixed(2);
+  document.getElementById("az").textContent = d.az.toFixed(2);
+
+  const dot = document.getElementById("imuDot");
+  const st = document.getElementById("imuStatus");
+  if (d.imu_connected) {
+    dot.className = "status-dot dot-green";
+    st.textContent = "IMU Connected";
+  } else {
+    dot.className = "status-dot dot-red";
+    st.textContent = "IMU Disconnected (sending zeros)";
+  }
+
+  if (d.sending) {
+    sending = true;
+    document.getElementById("seqDisplay").textContent = "packets: " + d.seq;
+  } else if (sending) {
+    sending = false;
+  }
+  updateUI();
+};
+</script>
+</body>
+</html>

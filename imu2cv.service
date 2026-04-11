@@ -1,0 +1,14 @@
+[Unit]
+Description=IMU2CV Web UI
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/IMU2CV
+ExecStart=/usr/bin/python3 /home/%i/IMU2CV/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,10 +1,10 @@
 # IMU2CV
 
-Streams real-time IMU orientation (pitch, roll, yaw) and acceleration data over UDP from a Raspberry Pi with a WitMotion WT901 sensor.
+Streams real-time IMU orientation (pitch, roll, yaw) and acceleration data over UDP from a Raspberry Pi with a WitMotion WT901 sensor. Includes a web UI to configure the target IP and monitor live values.
 
-## Setup (on the Pi)
+## Setup
 
-Clone and run the setup script:
+Clone and run the setup script on any Pi:
 
 ```bash
 git clone https://github.com/FerasSawan/PI-send-imu.git ~/IMU2CV
@@ -13,34 +13,30 @@ cd ~/IMU2CV
 sudo reboot
 ```
 
-This installs all dependencies and enables I2C automatically.
+After reboot the web UI starts automatically. Open `http://<PI_IP>:5000` in a browser.
 
-## Send IMU data
+## Usage
 
-```bash
-python3 imu_reader.py <RECEIVER_IP>
-```
+1. Open the web UI in a browser
+2. Enter the target IP and port (default 9000)
+3. Click **Start Sending**
 
-Example:
-
-```bash
-python3 imu_reader.py 192.168.1.68 9000
-```
-
-If the IMU isn't connected it sends zeros and auto-reconnects when plugged in.
-
-## Receive IMU data
-
-On the receiving computer:
+On the receiving computer, run:
 
 ```bash
 python3 receiver.py
 ```
 
-Listens on UDP port 9000 by default.
+## CLI (no UI)
+
+```bash
+python3 imu_reader.py <RECEIVER_IP> 9000
+```
 
 ## Files
 
-- `setup.sh` — installs dependencies and enables I2C
-- `imu_reader.py` — reads the WT901 over I2C and sends UDP packets at 50 Hz
+- `app.py` — web UI server (Flask)
+- `imu_reader.py` — headless CLI sender (reads WT901 over I2C, sends UDP at 50 Hz)
 - `receiver.py` — listens for UDP packets and prints live values
+- `setup.sh` — installs dependencies, enables I2C, starts the web UI service
+- `imu2cv.service` — systemd unit for auto-start on boot
