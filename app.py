@@ -21,7 +21,7 @@ from ble_transport import BLETransport
 app = Flask(__name__)
 
 REFRESH_HZ = 50
-SSE_HZ = 15  # UI updates don't need 50Hz
+SSE_HZ = 30  # Smooth UI updates
 RECONNECT_INTERVAL = 1.0
 FRAME_STALE_SEC = 2.0
 MODE = os.environ.get("IMU2CV_MODE", "auto").lower()
