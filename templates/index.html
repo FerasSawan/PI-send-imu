@@ -132,6 +132,7 @@
   <div style="margin-bottom: 12px;">
     <span class="status-dot" id="imuDot"></span>
     <span class="status-text" id="imuStatus">Checking...</span>
+    <span class="status-text" id="transport" style="margin-left: 12px; opacity: 0.6;"></span>
   </div>
   <div class="imu-grid">
     <div><div class="imu-val" id="pitch">0.00</div><div class="imu-label">Pitch <span class="imu-unit">deg</span></div></div>
@@ -221,6 +222,7 @@ es.onmessage = (e) => {
     dot.className = "status-dot dot-red";
     st.textContent = "IMU Disconnected (sending zeros)";
   }
+  document.getElementById("transport").textContent = d.transport || "";
 
   if (d.sending) {
     sending = true;

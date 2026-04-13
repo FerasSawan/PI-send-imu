@@ -6,7 +6,7 @@ echo "=== IMU2CV Setup ==="
 sudo apt update
 sudo apt install -y python3 python3-pip
 
-pip3 install --break-system-packages pyserial flask 2>/dev/null || pip3 install --user pyserial flask
+pip3 install --break-system-packages pyserial flask bleak 2>/dev/null || pip3 install --user pyserial flask bleak
 
 sudo usermod -aG dialout "$USER"
 

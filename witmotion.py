@@ -123,10 +123,14 @@ class WT901Parser:
         self.packets = 0
 
     def drain(self, ser: serial.Serial, max_read: int = 4096) -> bool:
-        """Read available bytes, parse frames, update cached values. Returns True if any frame parsed."""
+        """Read available bytes from serial, parse frames. Returns True if any frame parsed."""
         n = ser.in_waiting
         if n:
             self.buf.extend(ser.read(min(n, max_read)))
+        return self.drain_buf()
+
+    def drain_buf(self) -> bool:
+        """Parse any complete frames already in self.buf. Returns True if any frame parsed."""
         if len(self.buf) > 8192:
             self.buf.clear()
 
