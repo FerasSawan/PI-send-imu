@@ -1,6 +1,6 @@
 # IMU2CV
 
-Streams real-time IMU orientation (pitch, roll, yaw) and acceleration data over UDP from a Raspberry Pi with a WitMotion WT901BLECL sensor connected via USB. Includes a web UI to configure the target IP and monitor live values.
+Streams real-time IMU orientation (pitch, roll, yaw) and acceleration data over UDP from a Raspberry Pi with a WitMotion WT901BLECL sensor. Connect **via USB serial** (default in `usb` mode) or **via Bluetooth** on the `bluetooth` branch — see [BLE_README.md](BLE_README.md). Includes a web UI to configure the target IP and monitor live values.
 
 ## Setup
 
@@ -36,8 +36,9 @@ python3 imu_reader.py <RECEIVER_IP> 9000
 
 ## Files
 
-- `app.py` — web UI server (Flask)
-- `imu_reader.py` — headless CLI sender (reads WT901BLE over USB serial, sends UDP at 50 Hz)
+- `app.py` — web UI server (Flask); set `IMU2CV_MODE=usb|ble|auto` for transport
+- `imu_reader.py` — headless CLI sender (USB serial)
+- `ble_transport.py` — BLE scan/connect/notify (branch `bluetooth`; see [BLE_README.md](BLE_README.md))
 - `receiver.py` — listens for UDP packets and prints live values
 - `setup.sh` — installs dependencies and starts the web UI service
 - `imu2cv.service` — systemd unit for auto-start on boot
