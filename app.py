@@ -90,7 +90,7 @@ def _imu_loop():
                 _last_frame_time = 0.0
                 last_reconnect = time.time()
 
-        imu_ok = serial_open and _last_frame_time > 0 and (time.time() - _last_frame_time <= FRAME_STALE_SEC)
+        imu_ok = serial_open and _last_frame_time > 0 and (now - _last_frame_time <= FRAME_STALE_SEC)
 
         with _lock:
             state["imu_connected"] = imu_ok
