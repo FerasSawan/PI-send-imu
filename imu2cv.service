@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=%i
 WorkingDirectory=/home/%i/IMU2CV
+Environment=IMU2CV_MODE=auto
 ExecStart=/usr/bin/python3 /home/%i/IMU2CV/app.py
 Restart=always
 RestartSec=3

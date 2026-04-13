@@ -1,24 +1,26 @@
 # IMU2CV
 
-Streams real-time IMU orientation (pitch, roll, yaw) and acceleration data over UDP from a Raspberry Pi with a WitMotion WT901BLECL sensor. Connect **via USB serial** (default in `usb` mode) or **via Bluetooth** on the `bluetooth` branch — see [BLE_README.md](BLE_README.md). Includes a web UI to configure the target IP and monitor live values.
+Streams real-time IMU orientation (pitch, roll, yaw) and acceleration data over UDP from a Raspberry Pi with a WitMotion WT901BLECL sensor. Supports both **USB serial** and **Bluetooth Low Energy** — switch between them in the web UI. Includes a web UI to configure the target IP, switch transport mode, and monitor live values.
 
 ## Setup
 
 Clone and run the setup script on any Pi:
 
 ```bash
-git clone https://github.com/FerasSawan/PI-send-imu.git ~/IMU2CV
+git clone -b bluetooth https://github.com/FerasSawan/PI-send-imu.git ~/IMU2CV
 cd ~/IMU2CV
 ./setup.sh
 sudo reboot
 ```
 
-After reboot the web UI starts automatically. Plug in the WT901BLE via USB and open `http://<PI_IP>:2323` in a browser.
+After reboot the web UI starts automatically at `http://<PI_IP>:2323`.
 
 ## Usage
 
-1. Plug the WT901BLECL into the Pi via USB
-2. Open the web UI in a browser
+1. Open the web UI in a browser
+2. Choose your transport mode: **BLE** or **USB**
+   - **BLE**: Click **Connect BLE** to scan and connect wirelessly
+   - **USB**: Plug in the WT901BLECL via USB — it auto-detects
 3. Enter the target IP and port (default 9000)
 4. Click **Start Sending**
 
