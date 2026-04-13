@@ -59,8 +59,25 @@ def pick_serial_port(index: int = 0) -> Optional[str]:
     return ports[index % len(ports)]
 
 
-def open_serial(port: Optional[str] = None, baud: Optional[int] = None) -> Optional[serial.Serial]:
-    """Open one serial port. Pass explicit `port`, or None uses pick_serial_port(0)."""
+RATE_CODES = {10: 0x06, 20: 0x07, 50: 0x08, 100: 0x09, 200: 0x0B}
+DEFAULT_HZ = 50
+
+
+def configure_rate(ser: serial.Serial, hz: int = DEFAULT_HZ) -> None:
+    """Unlock config, set output rate, save. Persists across power cycles."""
+    import time
+    code = RATE_CODES.get(hz, RATE_CODES[DEFAULT_HZ])
+    ser.write(bytes([0xFF, 0xAA, 0x69, 0x88, 0xB5]))  # unlock
+    time.sleep(0.05)
+    ser.write(bytes([0xFF, 0xAA, 0x03, code, 0x00]))   # set rate
+    time.sleep(0.05)
+    ser.write(bytes([0xFF, 0xAA, 0x00, 0x00, 0x00]))   # save
+    time.sleep(0.1)
+    ser.reset_input_buffer()
+
+
+def open_serial(port: Optional[str] = None, baud: Optional[int] = None, hz: int = DEFAULT_HZ) -> Optional[serial.Serial]:
+    """Open one serial port and configure output rate."""
     b = baud if baud is not None else configured_baud()
     p = port or pick_serial_port(0)
     if not p:
@@ -68,6 +85,7 @@ def open_serial(port: Optional[str] = None, baud: Optional[int] = None) -> Optio
     try:
         ser = serial.Serial(p, b, timeout=0.05)
         ser.reset_input_buffer()
+        configure_rate(ser, hz)
         return ser
     except Exception:
         return None
