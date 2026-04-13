@@ -71,6 +71,12 @@ def _imu_loop_usb():
         state["transport"] = "USB (scanning...)"
 
     while not _stop_event.is_set() and not _usb_stop.is_set():
+        # Skip if we're not the active mode
+        with _lock:
+            if state["mode"] != "usb":
+                time.sleep(0.1)
+                continue
+
         now = time.time()
 
         if not serial_open:
@@ -124,6 +130,13 @@ def _ble_state_poller(ble: BLETransport):
         state["transport"] = "BLE (disconnected)"
 
     while not _stop_event.is_set():
+        # Skip if we're not the active mode
+        with _lock:
+            if state["mode"] != "ble":
+                state["ble_connecting"] = False
+                time.sleep(0.1)
+                continue
+
         p = ble.parser
         pitch, roll, yaw = p.pitch, p.roll, p.yaw
         ax, ay, az = p.ax, p.ay, p.az
