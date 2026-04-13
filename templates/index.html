@@ -120,6 +120,24 @@
   }
 
   .seq { font-variant-numeric: tabular-nums; font-size: 0.75rem; color: #aaa; margin-top: 8px; text-align: right; }
+
+  .btn-ble {
+    padding: 6px 16px;
+    border: 1.5px solid #3b82f6;
+    border-radius: 8px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    background: #fff;
+    color: #3b82f6;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+  .btn-ble:hover { background: #3b82f6; color: #fff; }
+  .btn-ble.connected { border-color: #ef4444; color: #ef4444; }
+  .btn-ble.connected:hover { background: #ef4444; color: #fff; }
+  .btn-ble.connecting { border-color: #f59e0b; color: #f59e0b; cursor: wait; }
+  .btn-ble:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -129,10 +147,13 @@
 
 <div class="card">
   <h2>IMU Data</h2>
-  <div style="margin-bottom: 12px;">
-    <span class="status-dot" id="imuDot"></span>
-    <span class="status-text" id="imuStatus">Checking...</span>
-    <span class="status-text" id="transport" style="margin-left: 12px; opacity: 0.6;"></span>
+  <div style="margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between;">
+    <div>
+      <span class="status-dot" id="imuDot"></span>
+      <span class="status-text" id="imuStatus">Checking...</span>
+      <span class="status-text" id="transport" style="margin-left: 12px; opacity: 0.6;"></span>
+    </div>
+    <button class="btn-ble" id="bleBtn" onclick="toggleBle()">Connect BLE</button>
   </div>
   <div class="imu-grid">
     <div><div class="imu-val" id="pitch">0.00</div><div class="imu-label">Pitch <span class="imu-unit">deg</span></div></div>
@@ -162,6 +183,31 @@
 
 <script>
 let sending = false;
+let bleConnected = false;
+let bleConnecting = false;
+
+function toggleBle() {
+  if (bleConnecting) return;
+  if (bleConnected) {
+    fetch("/api/ble/disconnect", {method: "POST"});
+  } else {
+    fetch("/api/ble/connect", {method: "POST"});
+  }
+}
+
+function updateBleBtn() {
+  const btn = document.getElementById("bleBtn");
+  if (bleConnecting) {
+    btn.textContent = "Scanning...";
+    btn.className = "btn-ble connecting";
+  } else if (bleConnected) {
+    btn.textContent = "Disconnect BLE";
+    btn.className = "btn-ble connected";
+  } else {
+    btn.textContent = "Connect BLE";
+    btn.className = "btn-ble";
+  }
+}
 
 function toggle() {
   sending ? stop() : start();
@@ -223,6 +269,10 @@ es.onmessage = (e) => {
     st.textContent = "IMU Disconnected (sending zeros)";
   }
   document.getElementById("transport").textContent = d.transport || "";
+
+  bleConnected = d.imu_connected;
+  bleConnecting = d.ble_connecting || false;
+  updateBleBtn();
 
   if (d.sending) {
     sending = true;

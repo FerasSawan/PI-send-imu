@@ -3,7 +3,8 @@
 Scans for devices advertising the WitMotion service, connects, subscribes
 to notifications, and feeds raw bytes into a WT901Parser.
 
-Uses the main-thread asyncio loop (required by BlueZ/D-Bus on Linux).
+Connection is manual — call connect() / disconnect() from any thread.
+The asyncio event loop runs in the main thread (required by BlueZ/D-Bus).
 """
 
 from __future__ import annotations
@@ -27,7 +28,8 @@ CONNECT_TIMEOUT = 10.0
 class BLETransport:
     """Manages a BLE connection to a WT901BLE.
 
-    call run_forever() from the main thread (it blocks).
+    call run_forever() from the main thread (it keeps the asyncio loop alive).
+    Use connect() / disconnect() from any thread to control the connection.
     Read .parser, .connected, .last_data_age from any thread.
     """
 
@@ -36,11 +38,16 @@ class BLETransport:
         self._target_addr = target_addr
         self.parser = WT901Parser()
         self.connected = False
+        self.connecting = False
         self.device_name: str = ""
         self.device_addr: str = ""
         self._last_data_time = 0.0
         self._lock = threading.Lock()
         self._stop = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._connect_requested = False
+        self._disconnect_requested = False
+        self._client: Optional[BleakClient] = None
 
     @property
     def last_data_age(self) -> float:
@@ -52,40 +59,68 @@ class BLETransport:
     def stop(self):
         self._stop = True
 
+    def connect(self):
+        """Request a BLE connection (thread-safe)."""
+        self._connect_requested = True
+
+    def disconnect(self):
+        """Request a BLE disconnection (thread-safe)."""
+        self._disconnect_requested = True
+
     def run_forever(self):
-        """Block the calling thread (must be main) running BLE."""
+        """Block the calling thread (must be main) running BLE event loop."""
         asyncio.run(self._main())
 
     async def _main(self):
+        self._loop = asyncio.get_running_loop()
         while not self._stop:
-            try:
-                addr = await self._find_device()
-                if not addr:
-                    await asyncio.sleep(2.0)
-                    continue
-
-                async with BleakClient(addr, timeout=CONNECT_TIMEOUT) as client:
-                    with self._lock:
-                        self.connected = True
-                    self.parser = WT901Parser()
-
-                    await client.start_notify(NOTIFY_CHAR, self._on_notify)
-
-                    while not self._stop and client.is_connected:
-                        await asyncio.sleep(0.5)
-
+            if self._disconnect_requested:
+                self._disconnect_requested = False
+                if self._client and self._client.is_connected:
                     try:
-                        await client.stop_notify(NOTIFY_CHAR)
+                        await self._client.stop_notify(NOTIFY_CHAR)
                     except Exception:
                         pass
-
-            except Exception:
-                pass
-            finally:
+                    try:
+                        await self._client.disconnect()
+                    except Exception:
+                        pass
+                    self._client = None
                 with self._lock:
                     self.connected = False
-                if not self._stop:
-                    await asyncio.sleep(2.0)
+                    self.connecting = False
+
+            if self._connect_requested:
+                self._connect_requested = False
+                if not self.connected:
+                    with self._lock:
+                        self.connecting = True
+                    try:
+                        addr = await self._find_device()
+                        if addr:
+                            client = BleakClient(addr, timeout=CONNECT_TIMEOUT)
+                            await client.connect()
+                            self._client = client
+                            self.parser = WT901Parser()
+                            await client.start_notify(NOTIFY_CHAR, self._on_notify)
+                            with self._lock:
+                                self.connected = True
+                                self.connecting = False
+                        else:
+                            with self._lock:
+                                self.connecting = False
+                    except Exception:
+                        with self._lock:
+                            self.connected = False
+                            self.connecting = False
+
+            # Check if connection dropped
+            if self.connected and self._client and not self._client.is_connected:
+                self._client = None
+                with self._lock:
+                    self.connected = False
+
+            await asyncio.sleep(0.3)
 
     async def _find_device(self) -> Optional[str]:
         if self._target_addr:

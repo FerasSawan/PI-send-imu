@@ -11,6 +11,7 @@ import struct
 import threading
 import time
 from queue import Queue, Empty
+from typing import Optional
 
 from flask import Flask, render_template, request, jsonify, Response
 
@@ -33,7 +34,10 @@ state = {
     "pitch": 0.0, "roll": 0.0, "yaw": 0.0,
     "ax": 0.0, "ay": 0.0, "az": 0.0,
     "transport": "",
+    "ble_connecting": False,
 }
+
+_ble: Optional[BLETransport] = None
 
 _lock = threading.Lock()
 _udp_sock = None
@@ -103,7 +107,7 @@ def _imu_loop_usb():
 def _ble_state_poller(ble: BLETransport):
     """Background thread that reads BLE parser and updates shared state."""
     with _lock:
-        state["transport"] = "BLE (scanning...)"
+        state["transport"] = "BLE (disconnected)"
 
     while not _stop_event.is_set():
         p = ble.parser
@@ -111,12 +115,14 @@ def _ble_state_poller(ble: BLETransport):
         ax, ay, az = p.ax, p.ay, p.az
         imu_ok = ble.connected and ble.last_data_age <= FRAME_STALE_SEC
 
-        if ble.connected:
-            with _lock:
+        with _lock:
+            state["ble_connecting"] = ble.connecting
+            if ble.connected:
                 state["transport"] = f"BLE ({ble.device_name or ble.device_addr})"
-        elif not imu_ok:
-            with _lock:
+            elif ble.connecting:
                 state["transport"] = "BLE (scanning...)"
+            else:
+                state["transport"] = "BLE (disconnected)"
 
         _update_state(imu_ok, pitch, roll, yaw, ax, ay, az)
         time.sleep(1.0 / REFRESH_HZ)
@@ -156,6 +162,7 @@ def _update_state(imu_ok, pitch, roll, yaw, ax, ay, az):
         "target_port": state["target_port"],
         "seq": state["seq"],
         "transport": state["transport"],
+        "ble_connecting": state.get("ble_connecting", False),
     })
 
 
@@ -201,6 +208,24 @@ def stop_sending():
     return jsonify({"ok": True})
 
 
+@app.route("/api/ble/connect", methods=["POST"])
+def ble_connect():
+    if _ble is None:
+        return jsonify({"error": "BLE not available in USB mode"}), 400
+    if _ble.connected:
+        return jsonify({"error": "Already connected"}), 400
+    _ble.connect()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/ble/disconnect", methods=["POST"])
+def ble_disconnect():
+    if _ble is None:
+        return jsonify({"error": "BLE not available in USB mode"}), 400
+    _ble.disconnect()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/stream")
 def stream():
     q: Queue = Queue(maxsize=50)
@@ -224,17 +249,18 @@ def stream():
 
 if __name__ == "__main__":
     if MODE in ("ble", "auto"):
-        ble = BLETransport()
+        _ble = BLETransport()
         # State poller in background thread
-        threading.Thread(target=_ble_state_poller, args=(ble,), daemon=True).start()
+        threading.Thread(target=_ble_state_poller, args=(_ble,), daemon=True).start()
         # Flask in background thread
         threading.Thread(target=lambda: app.run(host="0.0.0.0", port=2323, threaded=True),
                          daemon=True).start()
-        # BLE must run in main thread (BlueZ/D-Bus requirement)
+        # BLE event loop in main thread (BlueZ/D-Bus requirement)
+        # Does NOT auto-connect — user must click Connect in the UI
         try:
-            ble.run_forever()
+            _ble.run_forever()
         except KeyboardInterrupt:
-            ble.stop()
+            _ble.stop()
     else:
         threading.Thread(target=_imu_loop_usb, daemon=True).start()
         app.run(host="0.0.0.0", port=2323, threaded=True)
