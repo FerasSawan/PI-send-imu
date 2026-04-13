@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Real-time Pitch/Roll/Yaw from WitMotion WT901 IMU over I2C.
+"""Real-time Pitch/Roll/Yaw from WitMotion WT901BLECL over USB serial.
 
-The WT901 has onboard sensor fusion (accel + gyro + mag) and outputs
-orientation directly — no external filtering needed.
+The WT901BLE has onboard sensor fusion and outputs orientation directly.
+Connects via USB (CH340 serial) and streams data over UDP.
 
-Streams data over UDP for near-zero-latency consumption by any program.
 Usage:
     python3 imu_reader.py                        # local display only
     python3 imu_reader.py 192.168.1.50           # stream to one PC
@@ -13,74 +12,99 @@ Usage:
 """
 
 import argparse
-import math
+import glob
 import socket
 import struct
 import sys
 import time
 
-import smbus2
+import serial
 
-I2C_BUS = 1
-WT901_ADDR = 0x50
-
-# WT901 register addresses (each holds a signed int16)
-REG_AX = 0x34
-REG_AY = 0x35
-REG_AZ = 0x36
-REG_GX = 0x37
-REG_GY = 0x38
-REG_GZ = 0x39
-REG_HX = 0x3A
-REG_HY = 0x3B
-REG_HZ = 0x3C
-REG_ROLL = 0x3D
-REG_PITCH = 0x3E
-REG_YAW = 0x3F
-
+BAUD_RATE = 115200
 REFRESH_HZ = 50
 DEFAULT_PORT = 9000
-
-
-def read_angles(bus):
-    """Read fused Roll/Pitch/Yaw from WT901 onboard processor."""
-    data = bus.read_i2c_block_data(WT901_ADDR, REG_ROLL, 6)
-    roll_raw, pitch_raw, yaw_raw = struct.unpack("<3h", bytes(data))
-    scale = 180.0 / 32768.0
-    return roll_raw * scale, pitch_raw * scale, yaw_raw * scale
-
-
-def read_accel(bus):
-    """Read acceleration (g). Scale: raw / 32768 * 16g."""
-    data = bus.read_i2c_block_data(WT901_ADDR, REG_AX, 6)
-    ax, ay, az = struct.unpack("<3h", bytes(data))
-    scale = 16.0 / 32768.0
-    return ax * scale, ay * scale, az * scale
-
-
-def read_gyro(bus):
-    """Read angular velocity (deg/s). Scale: raw / 32768 * 2000."""
-    data = bus.read_i2c_block_data(WT901_ADDR, REG_GX, 6)
-    gx, gy, gz = struct.unpack("<3h", bytes(data))
-    scale = 2000.0 / 32768.0
-    return gx * scale, gy * scale, gz * scale
-
-
 RECONNECT_INTERVAL = 1.0
+PACKET_HEADER = 0x55
+PACKET_LEN = 11
 
 
-def open_bus():
-    """Try to open the I2C bus and verify the WT901 is present."""
+def find_serial_port():
+    """Auto-detect the WT901 USB serial device."""
+    for pattern in ["/dev/ttyUSB*", "/dev/ttyACM*"]:
+        ports = sorted(glob.glob(pattern))
+        if ports:
+            return ports[0]
+    return None
+
+
+def open_serial():
+    """Try to open the serial port and return the connection."""
+    port = find_serial_port()
+    if not port:
+        return None
     try:
-        bus = smbus2.SMBus(I2C_BUS)
-        bus.read_byte_data(WT901_ADDR, REG_ROLL)
-        return bus
+        ser = serial.Serial(port, BAUD_RATE, timeout=0.5)
+        ser.reset_input_buffer()
+        return ser
     except Exception:
         return None
 
 
+def parse_packet(buf):
+    """Parse one 11-byte WitMotion packet. Returns (type, values) or None."""
+    if len(buf) != PACKET_LEN or buf[0] != PACKET_HEADER:
+        return None
+    checksum = sum(buf[:10]) & 0xFF
+    if checksum != buf[10]:
+        return None
+    pkt_type = buf[1]
+    v0, v1, v2 = struct.unpack("<3h", buf[2:8])
+    return pkt_type, (v0, v1, v2)
+
+
+def read_imu(ser):
+    """Read serial data and return (pitch, roll, yaw, ax, ay, az) or None on failure."""
+    pitch = roll = yaw = None
+    ax = ay = az = None
+    deadline = time.time() + 0.1
+
+    while time.time() < deadline:
+        if ser.in_waiting < PACKET_LEN:
+            time.sleep(0.001)
+            continue
+
+        byte = ser.read(1)
+        if not byte or byte[0] != PACKET_HEADER:
+            continue
+
+        rest = ser.read(PACKET_LEN - 1)
+        if len(rest) != PACKET_LEN - 1:
+            continue
+
+        result = parse_packet(bytes([PACKET_HEADER]) + rest)
+        if result is None:
+            continue
+
+        pkt_type, (v0, v1, v2) = result
+
+        if pkt_type == 0x51:
+            s = 16.0 / 32768.0
+            ax, ay, az = v0 * s, v1 * s, v2 * s
+        elif pkt_type == 0x53:
+            s = 180.0 / 32768.0
+            roll, pitch, yaw = v0 * s, v1 * s, v2 * s
+
+        if all(v is not None for v in (pitch, roll, yaw, ax, ay, az)):
+            return pitch, roll, yaw, ax, ay, az
+
+    if pitch is not None and roll is not None and yaw is not None:
+        return pitch, roll, yaw, ax or 0.0, ay or 0.0, az or 0.0
+
+    return None
+
+
 def main():
-    parser = argparse.ArgumentParser(description="IMU2CV — WT901 orientation over UDP")
+    parser = argparse.ArgumentParser(description="IMU2CV — WT901BLE orientation over UDP")
     parser.add_argument("target_ip", nargs="?", default=None,
                         help="IP of the receiving computer (omit for local-only display)")
     parser.add_argument("port", nargs="?", type=int, default=DEFAULT_PORT,
@@ -97,14 +121,14 @@ def main():
         print("Local display only (pass an IP to stream over UDP)")
 
     seq = 0
-    bus = open_bus()
-    connected = bus is not None
+    ser = open_serial()
+    connected = ser is not None
     last_reconnect = 0.0
 
     if connected:
-        print("IMU2CV — WitMotion WT901  (Ctrl+C to quit)")
+        print(f"IMU2CV — WT901BLE on {ser.port}  (Ctrl+C to quit)")
     else:
-        print("IMU2CV — WT901 not detected, sending zeros until connected  (Ctrl+C to quit)")
+        print("IMU2CV — WT901BLE not detected, sending zeros until connected  (Ctrl+C to quit)")
     print("=" * 56)
 
     try:
@@ -113,10 +137,10 @@ def main():
                 now = time.time()
                 if now - last_reconnect >= RECONNECT_INTERVAL:
                     last_reconnect = now
-                    bus = open_bus()
-                    if bus is not None:
+                    ser = open_serial()
+                    if ser is not None:
                         connected = True
-                        sys.stdout.write("\n[IMU connected]\n")
+                        sys.stdout.write(f"\n[IMU connected on {ser.port}]\n")
                         sys.stdout.flush()
 
             pitch = roll = yaw = 0.0
@@ -124,17 +148,18 @@ def main():
 
             if connected:
                 try:
-                    roll, pitch, yaw = read_angles(bus)
-                    ax, ay, az = read_accel(bus)
+                    result = read_imu(ser)
+                    if result:
+                        pitch, roll, yaw, ax, ay, az = result
                 except Exception:
                     sys.stdout.write("\n[IMU disconnected — sending zeros]\n")
                     sys.stdout.flush()
                     connected = False
                     try:
-                        bus.close()
+                        ser.close()
                     except Exception:
                         pass
-                    bus = None
+                    ser = None
                     last_reconnect = time.time()
 
             status = " " if connected else "!"
@@ -155,8 +180,8 @@ def main():
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
-        if bus:
-            bus.close()
+        if ser:
+            ser.close()
         if udp_sock:
             udp_sock.close()
 

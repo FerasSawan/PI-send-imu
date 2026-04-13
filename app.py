@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """IMU2CV Web UI — configure and monitor IMU streaming from a browser."""
 
+import glob
 import json
 import socket
 import struct
@@ -8,16 +9,16 @@ import threading
 import time
 from queue import Queue, Empty
 
+import serial
 from flask import Flask, render_template, request, jsonify, Response
 
 app = Flask(__name__)
 
-I2C_BUS = 1
-WT901_ADDR = 0x50
-REG_AX = 0x34
-REG_ROLL = 0x3D
+BAUD_RATE = 115200
 REFRESH_HZ = 50
 RECONNECT_INTERVAL = 1.0
+PACKET_HEADER = 0x55
+PACKET_LEN = 11
 
 state = {
     "imu_connected": False,
@@ -30,34 +31,81 @@ state = {
 }
 
 _lock = threading.Lock()
-_bus = None
+_ser = None
 _udp_sock = None
 _stop_event = threading.Event()
 _sse_clients: list[Queue] = []
 
 
-def _open_bus():
+def _find_serial_port():
+    for pattern in ["/dev/ttyUSB*", "/dev/ttyACM*"]:
+        ports = sorted(glob.glob(pattern))
+        if ports:
+            return ports[0]
+    return None
+
+
+def _open_serial():
+    port = _find_serial_port()
+    if not port:
+        return None
     try:
-        import smbus2
-        bus = smbus2.SMBus(I2C_BUS)
-        bus.read_byte_data(WT901_ADDR, REG_ROLL)
-        return bus
+        ser = serial.Serial(port, BAUD_RATE, timeout=0.5)
+        ser.reset_input_buffer()
+        return ser
     except Exception:
         return None
 
 
-def _read_angles(bus):
-    data = bus.read_i2c_block_data(WT901_ADDR, REG_ROLL, 6)
-    r, p, y = struct.unpack("<3h", bytes(data))
-    s = 180.0 / 32768.0
-    return r * s, p * s, y * s
+def _parse_packet(buf):
+    if len(buf) != PACKET_LEN or buf[0] != PACKET_HEADER:
+        return None
+    checksum = sum(buf[:10]) & 0xFF
+    if checksum != buf[10]:
+        return None
+    pkt_type = buf[1]
+    v0, v1, v2 = struct.unpack("<3h", buf[2:8])
+    return pkt_type, (v0, v1, v2)
 
 
-def _read_accel(bus):
-    data = bus.read_i2c_block_data(WT901_ADDR, REG_AX, 6)
-    ax, ay, az = struct.unpack("<3h", bytes(data))
-    s = 16.0 / 32768.0
-    return ax * s, ay * s, az * s
+def _read_imu(ser):
+    pitch = roll = yaw = None
+    ax = ay = az = None
+    deadline = time.time() + 0.1
+
+    while time.time() < deadline:
+        if ser.in_waiting < PACKET_LEN:
+            time.sleep(0.001)
+            continue
+
+        byte = ser.read(1)
+        if not byte or byte[0] != PACKET_HEADER:
+            continue
+
+        rest = ser.read(PACKET_LEN - 1)
+        if len(rest) != PACKET_LEN - 1:
+            continue
+
+        result = _parse_packet(bytes([PACKET_HEADER]) + rest)
+        if result is None:
+            continue
+
+        pkt_type, (v0, v1, v2) = result
+
+        if pkt_type == 0x51:
+            s = 16.0 / 32768.0
+            ax, ay, az = v0 * s, v1 * s, v2 * s
+        elif pkt_type == 0x53:
+            s = 180.0 / 32768.0
+            roll, pitch, yaw = v0 * s, v1 * s, v2 * s
+
+        if all(v is not None for v in (pitch, roll, yaw, ax, ay, az)):
+            return pitch, roll, yaw, ax, ay, az
+
+    if pitch is not None and roll is not None and yaw is not None:
+        return pitch, roll, yaw, ax or 0.0, ay or 0.0, az or 0.0
+
+    return None
 
 
 def _broadcast_sse(data: dict):
@@ -73,7 +121,7 @@ def _broadcast_sse(data: dict):
 
 
 def _imu_loop():
-    global _bus, _udp_sock
+    global _ser, _udp_sock
     last_reconnect = 0.0
 
     while not _stop_event.is_set():
@@ -84,8 +132,8 @@ def _imu_loop():
             now = time.time()
             if now - last_reconnect >= RECONNECT_INTERVAL:
                 last_reconnect = now
-                _bus = _open_bus()
-                if _bus is not None:
+                _ser = _open_serial()
+                if _ser is not None:
                     with _lock:
                         state["imu_connected"] = True
                         connected = True
@@ -95,16 +143,17 @@ def _imu_loop():
 
         if connected:
             try:
-                roll, pitch, yaw = _read_angles(_bus)
-                ax, ay, az = _read_accel(_bus)
+                result = _read_imu(_ser)
+                if result:
+                    pitch, roll, yaw, ax, ay, az = result
             except Exception:
                 with _lock:
                     state["imu_connected"] = False
                 try:
-                    _bus.close()
+                    _ser.close()
                 except Exception:
                     pass
-                _bus = None
+                _ser = None
                 last_reconnect = time.time()
 
         with _lock:
@@ -208,4 +257,4 @@ def stream():
 if __name__ == "__main__":
     t = threading.Thread(target=_imu_loop, daemon=True)
     t.start()
-    app.run(host="0.0.0.0", port=5000, threaded=True)
+    app.run(host="0.0.0.0", port=2323, threaded=True)
