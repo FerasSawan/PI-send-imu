@@ -35,6 +35,7 @@ state = {
     "ax": 0.0, "ay": 0.0, "az": 0.0,
     "transport": "",
     "ble_connecting": False,
+    "mode": "ble",  # "ble" or "usb"
 }
 
 _ble: Optional[BLETransport] = None
@@ -42,6 +43,7 @@ _ble: Optional[BLETransport] = None
 _lock = threading.Lock()
 _udp_sock = None
 _stop_event = threading.Event()
+_usb_stop = threading.Event()
 _sse_clients: list[Queue] = []
 
 
@@ -58,14 +60,17 @@ def _broadcast_sse(data: dict):
 
 
 def _imu_loop_usb():
-    """USB serial transport loop."""
+    """USB serial transport loop. Stops when _usb_stop is set."""
     ser = None
     parser = None
     last_frame = 0.0
     last_reconnect = 0.0
     serial_open = False
 
-    while not _stop_event.is_set():
+    with _lock:
+        state["transport"] = "USB (scanning...)"
+
+    while not _stop_event.is_set() and not _usb_stop.is_set():
         now = time.time()
 
         if not serial_open:
@@ -102,6 +107,15 @@ def _imu_loop_usb():
         imu_ok = serial_open and last_frame > 0 and (now - last_frame <= FRAME_STALE_SEC)
         _update_state(imu_ok, pitch, roll, yaw, ax, ay, az)
         time.sleep(1.0 / REFRESH_HZ)
+
+    # Clean up serial on exit
+    if ser:
+        try:
+            ser.close()
+        except Exception:
+            pass
+    with _lock:
+        state["imu_connected"] = False
 
 
 def _ble_state_poller(ble: BLETransport):
@@ -163,6 +177,7 @@ def _update_state(imu_ok, pitch, roll, yaw, ax, ay, az):
         "seq": state["seq"],
         "transport": state["transport"],
         "ble_connecting": state.get("ble_connecting", False),
+        "mode": state.get("mode", "ble"),
     })
 
 
@@ -208,10 +223,50 @@ def stop_sending():
     return jsonify({"ok": True})
 
 
+@app.route("/api/mode", methods=["POST"])
+def set_mode():
+    """Switch between 'ble' and 'usb' mode at runtime."""
+    data = request.json or {}
+    new_mode = data.get("mode", "").lower()
+    if new_mode not in ("ble", "usb"):
+        return jsonify({"error": "mode must be 'ble' or 'usb'"}), 400
+
+    with _lock:
+        current = state["mode"]
+    if new_mode == current:
+        return jsonify({"ok": True, "mode": new_mode})
+
+    # Tear down current mode
+    if current == "ble" and _ble is not None:
+        _ble.disconnect()
+    elif current == "usb":
+        _usb_stop.set()
+
+    # Start new mode
+    if new_mode == "ble":
+        _usb_stop.set()  # ensure USB is stopped
+        with _lock:
+            state["mode"] = "ble"
+            state["transport"] = "BLE (disconnected)"
+            state["imu_connected"] = False
+    elif new_mode == "usb":
+        if _ble is not None:
+            _ble.disconnect()
+        _usb_stop.clear()
+        threading.Thread(target=_imu_loop_usb, daemon=True).start()
+        with _lock:
+            state["mode"] = "usb"
+
+    return jsonify({"ok": True, "mode": new_mode})
+
+
 @app.route("/api/ble/connect", methods=["POST"])
 def ble_connect():
     if _ble is None:
-        return jsonify({"error": "BLE not available in USB mode"}), 400
+        return jsonify({"error": "BLE not available"}), 400
+    with _lock:
+        if state["mode"] != "ble":
+            return jsonify({"error": "Switch to BLE mode first"}), 400
     if _ble.connected:
         return jsonify({"error": "Already connected"}), 400
     _ble.connect()
@@ -221,7 +276,7 @@ def ble_connect():
 @app.route("/api/ble/disconnect", methods=["POST"])
 def ble_disconnect():
     if _ble is None:
-        return jsonify({"error": "BLE not available in USB mode"}), 400
+        return jsonify({"error": "BLE not available"}), 400
     _ble.disconnect()
     return jsonify({"ok": True})
 

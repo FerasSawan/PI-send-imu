@@ -121,25 +121,6 @@
 
   .seq { font-variant-numeric: tabular-nums; font-size: 0.75rem; color: #aaa; margin-top: 8px; text-align: right; }
 
-  .btn-ble {
-    padding: 6px 16px;
-    border: 1.5px solid #3b82f6;
-    border-radius: 8px;
-    font-size: 0.8rem;
-    font-weight: 600;
-    cursor: pointer;
-    background: #fff;
-    color: #3b82f6;
-    transition: all 0.2s;
-    white-space: nowrap;
-  }
-  .btn-ble:hover { background: #3b82f6; color: #fff; }
-  .btn-ble.connected { border-color: #ef4444; color: #ef4444; }
-  .btn-ble.connected:hover { background: #ef4444; color: #fff; }
-  .btn-ble.connecting { border-color: #f59e0b; color: #f59e0b; cursor: wait; }
-  .btn-ble:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  /* Full-width row so the button is never clipped beside long status text */
   .imu-status-block { margin-bottom: 12px; }
   .status-line {
     display: flex;
@@ -148,10 +129,47 @@
     gap: 6px 10px;
     margin-bottom: 10px;
   }
-  .btn-ble-row {
+
+  .mode-switcher {
+    display: flex;
+    gap: 0;
+    margin-bottom: 10px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1.5px solid #ddd;
+  }
+  .mode-btn {
+    flex: 1;
+    padding: 10px 0;
+    border: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    background: #faf8f6;
+    color: #888;
+    transition: all 0.2s;
+  }
+  .mode-btn.active { background: #1a1a1a; color: #fff; }
+  .mode-btn:not(.active):hover { background: #eee; }
+
+  .action-btn {
     width: 100%;
     padding: 10px 14px;
+    border: 1.5px solid #3b82f6;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    background: #fff;
+    color: #3b82f6;
+    transition: all 0.2s;
   }
+  .action-btn:hover { background: #3b82f6; color: #fff; }
+  .action-btn.connected { border-color: #ef4444; color: #ef4444; }
+  .action-btn.connected:hover { background: #ef4444; color: #fff; }
+  .action-btn.connecting { border-color: #f59e0b; color: #f59e0b; cursor: wait; }
+  .action-btn.usb-active { border-color: #22c55e; color: #22c55e; }
+  .action-btn.usb-active:hover { background: #22c55e; color: #fff; }
 </style>
 </head>
 <body>
@@ -167,7 +185,11 @@
       <span class="status-text" id="imuStatus">Checking...</span>
       <span class="status-text" id="transport" style="opacity: 0.6;"></span>
     </div>
-    <button type="button" class="btn-ble btn-ble-row" id="bleBtn" onclick="toggleBle()">Connect BLE</button>
+    <div class="mode-switcher">
+      <button type="button" class="mode-btn active" id="modeBle" onclick="setMode('ble')">BLE</button>
+      <button type="button" class="mode-btn" id="modeUsb" onclick="setMode('usb')">USB</button>
+    </div>
+    <button type="button" class="action-btn" id="actionBtn" onclick="actionClick()">Connect BLE</button>
   </div>
   <div class="imu-grid">
     <div><div class="imu-val" id="pitch">0.00</div><div class="imu-label">Pitch <span class="imu-unit">deg</span></div></div>
@@ -197,29 +219,65 @@
 
 <script>
 let sending = false;
+let currentMode = "ble";
 let bleConnected = false;
 let bleConnecting = false;
+let imuConnected = false;
 
-function toggleBle() {
-  if (bleConnecting) return;
-  if (bleConnected) {
-    fetch("/api/ble/disconnect", {method: "POST"});
-  } else {
-    fetch("/api/ble/connect", {method: "POST"});
-  }
+function setMode(mode) {
+  if (mode === currentMode) return;
+  fetch("/api/mode", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({mode})
+  });
 }
 
-function updateBleBtn() {
-  const btn = document.getElementById("bleBtn");
-  if (bleConnecting) {
-    btn.textContent = "Scanning...";
-    btn.className = "btn-ble btn-ble-row connecting";
-  } else if (bleConnected) {
-    btn.textContent = "Disconnect BLE";
-    btn.className = "btn-ble btn-ble-row connected";
+function actionClick() {
+  if (currentMode === "ble") {
+    if (bleConnecting) return;
+    if (imuConnected) {
+      fetch("/api/ble/disconnect", {method: "POST"});
+    } else {
+      fetch("/api/ble/connect", {method: "POST"});
+    }
+  }
+  // USB mode auto-connects, no action needed
+}
+
+function updateModeUI() {
+  const bleBtn = document.getElementById("modeBle");
+  const usbBtn = document.getElementById("modeUsb");
+  const actionBtn = document.getElementById("actionBtn");
+
+  bleBtn.className = "mode-btn" + (currentMode === "ble" ? " active" : "");
+  usbBtn.className = "mode-btn" + (currentMode === "usb" ? " active" : "");
+
+  if (currentMode === "ble") {
+    if (bleConnecting) {
+      actionBtn.textContent = "Scanning...";
+      actionBtn.className = "action-btn connecting";
+      actionBtn.style.display = "";
+    } else if (imuConnected) {
+      actionBtn.textContent = "Disconnect BLE";
+      actionBtn.className = "action-btn connected";
+      actionBtn.style.display = "";
+    } else {
+      actionBtn.textContent = "Connect BLE";
+      actionBtn.className = "action-btn";
+      actionBtn.style.display = "";
+    }
   } else {
-    btn.textContent = "Connect BLE";
-    btn.className = "btn-ble btn-ble-row";
+    // USB — auto-connects, show status only
+    if (imuConnected) {
+      actionBtn.textContent = "USB Connected";
+      actionBtn.className = "action-btn usb-active";
+      actionBtn.style.display = "";
+    } else {
+      actionBtn.textContent = "Searching for USB...";
+      actionBtn.className = "action-btn connecting";
+      actionBtn.style.display = "";
+    }
   }
 }
 
@@ -284,9 +342,10 @@ es.onmessage = (e) => {
   }
   document.getElementById("transport").textContent = d.transport || "";
 
-  bleConnected = d.imu_connected;
+  currentMode = d.mode || "ble";
+  imuConnected = d.imu_connected;
   bleConnecting = d.ble_connecting || false;
-  updateBleBtn();
+  updateModeUI();
 
   if (d.sending) {
     sending = true;
