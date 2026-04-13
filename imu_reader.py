@@ -12,95 +12,17 @@ Usage:
 """
 
 import argparse
-import glob
 import socket
 import struct
 import sys
 import time
 
-import serial
+from witmotion import WT901Parser, open_serial
 
-BAUD_RATE = 115200
 REFRESH_HZ = 50
 DEFAULT_PORT = 9000
 RECONNECT_INTERVAL = 1.0
-PACKET_HEADER = 0x55
-PACKET_LEN = 11
-
-
-def find_serial_port():
-    """Auto-detect the WT901 USB serial device."""
-    for pattern in ["/dev/ttyUSB*", "/dev/ttyACM*"]:
-        ports = sorted(glob.glob(pattern))
-        if ports:
-            return ports[0]
-    return None
-
-
-def open_serial():
-    """Try to open the serial port and return the connection."""
-    port = find_serial_port()
-    if not port:
-        return None
-    try:
-        ser = serial.Serial(port, BAUD_RATE, timeout=0.5)
-        ser.reset_input_buffer()
-        return ser
-    except Exception:
-        return None
-
-
-def parse_packet(buf):
-    """Parse one 11-byte WitMotion packet. Returns (type, values) or None."""
-    if len(buf) != PACKET_LEN or buf[0] != PACKET_HEADER:
-        return None
-    checksum = sum(buf[:10]) & 0xFF
-    if checksum != buf[10]:
-        return None
-    pkt_type = buf[1]
-    v0, v1, v2 = struct.unpack("<3h", buf[2:8])
-    return pkt_type, (v0, v1, v2)
-
-
-def read_imu(ser):
-    """Read serial data and return (pitch, roll, yaw, ax, ay, az) or None on failure."""
-    pitch = roll = yaw = None
-    ax = ay = az = None
-    deadline = time.time() + 0.1
-
-    while time.time() < deadline:
-        if ser.in_waiting < PACKET_LEN:
-            time.sleep(0.001)
-            continue
-
-        byte = ser.read(1)
-        if not byte or byte[0] != PACKET_HEADER:
-            continue
-
-        rest = ser.read(PACKET_LEN - 1)
-        if len(rest) != PACKET_LEN - 1:
-            continue
-
-        result = parse_packet(bytes([PACKET_HEADER]) + rest)
-        if result is None:
-            continue
-
-        pkt_type, (v0, v1, v2) = result
-
-        if pkt_type == 0x51:
-            s = 16.0 / 32768.0
-            ax, ay, az = v0 * s, v1 * s, v2 * s
-        elif pkt_type == 0x53:
-            s = 180.0 / 32768.0
-            roll, pitch, yaw = v0 * s, v1 * s, v2 * s
-
-        if all(v is not None for v in (pitch, roll, yaw, ax, ay, az)):
-            return pitch, roll, yaw, ax, ay, az
-
-    if pitch is not None and roll is not None and yaw is not None:
-        return pitch, roll, yaw, ax or 0.0, ay or 0.0, az or 0.0
-
-    return None
+FRAME_STALE_SEC = 2.0
 
 
 def main():
@@ -122,10 +44,12 @@ def main():
 
     seq = 0
     ser = open_serial()
-    connected = ser is not None
+    serial_open = ser is not None
+    imu_parser = WT901Parser() if ser else None
     last_reconnect = 0.0
+    last_frame = 0.0
 
-    if connected:
+    if serial_open:
         print(f"IMU2CV — WT901BLE on {ser.port}  (Ctrl+C to quit)")
     else:
         print("IMU2CV — WT901BLE not detected, sending zeros until connected  (Ctrl+C to quit)")
@@ -133,36 +57,42 @@ def main():
 
     try:
         while True:
-            if not connected:
+            if not serial_open:
                 now = time.time()
                 if now - last_reconnect >= RECONNECT_INTERVAL:
                     last_reconnect = now
                     ser = open_serial()
                     if ser is not None:
-                        connected = True
-                        sys.stdout.write(f"\n[IMU connected on {ser.port}]\n")
+                        imu_parser = WT901Parser()
+                        serial_open = True
+                        last_frame = 0.0
+                        sys.stdout.write(f"\n[Serial opened {ser.port}]\n")
                         sys.stdout.flush()
 
             pitch = roll = yaw = 0.0
             ax = ay = az = 0.0
+            imu_ok = False
 
-            if connected:
+            if serial_open and ser is not None and imu_parser is not None:
                 try:
-                    result = read_imu(ser)
-                    if result:
-                        pitch, roll, yaw, ax, ay, az = result
+                    if imu_parser.drain(ser):
+                        last_frame = time.time()
+                    pitch, roll, yaw = imu_parser.pitch, imu_parser.roll, imu_parser.yaw
+                    ax, ay, az = imu_parser.ax, imu_parser.ay, imu_parser.az
+                    imu_ok = last_frame > 0 and (time.time() - last_frame <= FRAME_STALE_SEC)
                 except Exception:
-                    sys.stdout.write("\n[IMU disconnected — sending zeros]\n")
+                    sys.stdout.write("\n[Serial error — reconnecting]\n")
                     sys.stdout.flush()
-                    connected = False
                     try:
                         ser.close()
                     except Exception:
                         pass
                     ser = None
+                    imu_parser = None
+                    serial_open = False
                     last_reconnect = time.time()
 
-            status = " " if connected else "!"
+            status = " " if imu_ok else "!"
             sys.stdout.write(
                 f"\r{status} P:{pitch:+7.2f}° R:{roll:+7.2f}° Y:{yaw:+7.2f}°  "
                 f"AX:{ax:+5.2f}g AY:{ay:+5.2f}g AZ:{az:+5.2f}g  "

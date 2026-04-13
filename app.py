@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """IMU2CV Web UI — configure and monitor IMU streaming from a browser."""
 
-import glob
 import json
 import socket
 import struct
@@ -9,16 +8,15 @@ import threading
 import time
 from queue import Queue, Empty
 
-import serial
 from flask import Flask, render_template, request, jsonify, Response
+
+from witmotion import WT901Parser, open_serial
 
 app = Flask(__name__)
 
-BAUD_RATE = 115200
 REFRESH_HZ = 50
 RECONNECT_INTERVAL = 1.0
-PACKET_HEADER = 0x55
-PACKET_LEN = 11
+FRAME_STALE_SEC = 2.0
 
 state = {
     "imu_connected": False,
@@ -32,80 +30,11 @@ state = {
 
 _lock = threading.Lock()
 _ser = None
+_parser: WT901Parser | None = None
+_last_frame_time = 0.0
 _udp_sock = None
 _stop_event = threading.Event()
 _sse_clients: list[Queue] = []
-
-
-def _find_serial_port():
-    for pattern in ["/dev/ttyUSB*", "/dev/ttyACM*"]:
-        ports = sorted(glob.glob(pattern))
-        if ports:
-            return ports[0]
-    return None
-
-
-def _open_serial():
-    port = _find_serial_port()
-    if not port:
-        return None
-    try:
-        ser = serial.Serial(port, BAUD_RATE, timeout=0.5)
-        ser.reset_input_buffer()
-        return ser
-    except Exception:
-        return None
-
-
-def _parse_packet(buf):
-    if len(buf) != PACKET_LEN or buf[0] != PACKET_HEADER:
-        return None
-    checksum = sum(buf[:10]) & 0xFF
-    if checksum != buf[10]:
-        return None
-    pkt_type = buf[1]
-    v0, v1, v2 = struct.unpack("<3h", buf[2:8])
-    return pkt_type, (v0, v1, v2)
-
-
-def _read_imu(ser):
-    pitch = roll = yaw = None
-    ax = ay = az = None
-    deadline = time.time() + 0.1
-
-    while time.time() < deadline:
-        if ser.in_waiting < PACKET_LEN:
-            time.sleep(0.001)
-            continue
-
-        byte = ser.read(1)
-        if not byte or byte[0] != PACKET_HEADER:
-            continue
-
-        rest = ser.read(PACKET_LEN - 1)
-        if len(rest) != PACKET_LEN - 1:
-            continue
-
-        result = _parse_packet(bytes([PACKET_HEADER]) + rest)
-        if result is None:
-            continue
-
-        pkt_type, (v0, v1, v2) = result
-
-        if pkt_type == 0x51:
-            s = 16.0 / 32768.0
-            ax, ay, az = v0 * s, v1 * s, v2 * s
-        elif pkt_type == 0x53:
-            s = 180.0 / 32768.0
-            roll, pitch, yaw = v0 * s, v1 * s, v2 * s
-
-        if all(v is not None for v in (pitch, roll, yaw, ax, ay, az)):
-            return pitch, roll, yaw, ax, ay, az
-
-    if pitch is not None and roll is not None and yaw is not None:
-        return pitch, roll, yaw, ax or 0.0, ay or 0.0, az or 0.0
-
-    return None
 
 
 def _broadcast_sse(data: dict):
@@ -121,42 +50,50 @@ def _broadcast_sse(data: dict):
 
 
 def _imu_loop():
-    global _ser, _udp_sock
+    global _ser, _parser, _last_frame_time, _udp_sock
     last_reconnect = 0.0
+    serial_open = False
 
     while not _stop_event.is_set():
-        with _lock:
-            connected = state["imu_connected"]
+        now = time.time()
 
-        if not connected:
-            now = time.time()
+        if not serial_open:
             if now - last_reconnect >= RECONNECT_INTERVAL:
                 last_reconnect = now
-                _ser = _open_serial()
+                _ser = open_serial()
                 if _ser is not None:
-                    with _lock:
-                        state["imu_connected"] = True
-                        connected = True
+                    _parser = WT901Parser()
+                    _last_frame_time = 0.0
+                    serial_open = True
 
         pitch = roll = yaw = 0.0
         ax = ay = az = 0.0
 
-        if connected:
+        if serial_open and _ser is not None and _parser is not None:
             try:
-                result = _read_imu(_ser)
-                if result:
-                    pitch, roll, yaw, ax, ay, az = result
+                if _parser.drain(_ser):
+                    _last_frame_time = time.time()
+                pitch = _parser.pitch
+                roll = _parser.roll
+                yaw = _parser.yaw
+                ax = _parser.ax
+                ay = _parser.ay
+                az = _parser.az
             except Exception:
-                with _lock:
-                    state["imu_connected"] = False
                 try:
                     _ser.close()
                 except Exception:
                     pass
                 _ser = None
+                _parser = None
+                serial_open = False
+                _last_frame_time = 0.0
                 last_reconnect = time.time()
 
+        imu_ok = serial_open and _last_frame_time > 0 and (time.time() - _last_frame_time <= FRAME_STALE_SEC)
+
         with _lock:
+            state["imu_connected"] = imu_ok
             state["pitch"] = round(pitch, 2)
             state["roll"] = round(roll, 2)
             state["yaw"] = round(yaw, 2)
