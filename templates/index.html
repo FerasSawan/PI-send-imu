@@ -138,6 +138,20 @@
   .btn-ble.connected:hover { background: #ef4444; color: #fff; }
   .btn-ble.connecting { border-color: #f59e0b; color: #f59e0b; cursor: wait; }
   .btn-ble:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Full-width row so the button is never clipped beside long status text */
+  .imu-status-block { margin-bottom: 12px; }
+  .status-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    margin-bottom: 10px;
+  }
+  .btn-ble-row {
+    width: 100%;
+    padding: 10px 14px;
+  }
 </style>
 </head>
 <body>
@@ -147,13 +161,13 @@
 
 <div class="card">
   <h2>IMU Data</h2>
-  <div style="margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between;">
-    <div>
+  <div class="imu-status-block">
+    <div class="status-line">
       <span class="status-dot" id="imuDot"></span>
       <span class="status-text" id="imuStatus">Checking...</span>
-      <span class="status-text" id="transport" style="margin-left: 12px; opacity: 0.6;"></span>
+      <span class="status-text" id="transport" style="opacity: 0.6;"></span>
     </div>
-    <button class="btn-ble" id="bleBtn" onclick="toggleBle()">Connect BLE</button>
+    <button type="button" class="btn-ble btn-ble-row" id="bleBtn" onclick="toggleBle()">Connect BLE</button>
   </div>
   <div class="imu-grid">
     <div><div class="imu-val" id="pitch">0.00</div><div class="imu-label">Pitch <span class="imu-unit">deg</span></div></div>
@@ -199,13 +213,13 @@ function updateBleBtn() {
   const btn = document.getElementById("bleBtn");
   if (bleConnecting) {
     btn.textContent = "Scanning...";
-    btn.className = "btn-ble connecting";
+    btn.className = "btn-ble btn-ble-row connecting";
   } else if (bleConnected) {
     btn.textContent = "Disconnect BLE";
-    btn.className = "btn-ble connected";
+    btn.className = "btn-ble btn-ble-row connected";
   } else {
     btn.textContent = "Connect BLE";
-    btn.className = "btn-ble";
+    btn.className = "btn-ble btn-ble-row";
   }
 }
 
