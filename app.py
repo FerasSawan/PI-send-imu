@@ -71,11 +71,10 @@ def _imu_loop_usb():
         state["transport"] = "USB (scanning...)"
 
     while not _stop_event.is_set() and not _usb_stop.is_set():
-        # Skip if we're not the active mode
-        with _lock:
-            if state["mode"] != "usb":
-                time.sleep(0.1)
-                continue
+        # Skip if we're not the active mode (no lock needed, just a dict read)
+        if state["mode"] != "usb":
+            time.sleep(0.1)
+            continue
 
         now = time.time()
 
@@ -130,12 +129,11 @@ def _ble_state_poller(ble: BLETransport):
         state["transport"] = "BLE (disconnected)"
 
     while not _stop_event.is_set():
-        # Skip if we're not the active mode
-        with _lock:
-            if state["mode"] != "ble":
-                state["ble_connecting"] = False
-                time.sleep(0.1)
-                continue
+        # Skip if we're not the active mode (no lock needed, just a dict read)
+        if state["mode"] != "ble":
+            state["ble_connecting"] = False
+            time.sleep(0.1)
+            continue
 
         p = ble.parser
         pitch, roll, yaw = p.pitch, p.roll, p.yaw
@@ -175,11 +173,11 @@ def _update_state(imu_ok, pitch, roll, yaw, ax, ay, az):
             packet = struct.pack("<Idffffff", seq, time.time(),
                                  pitch, roll, yaw, ax, ay, az)
             _udp_sock.sendto(packet, (target_ip, target_port))
-            with _lock:
-                state["seq"] += 1
+            state["seq"] = seq + 1
         except Exception:
             pass
 
+    # Snapshot for SSE — no lock needed, values are already written
     _broadcast_sse({
         "pitch": state["pitch"], "roll": state["roll"], "yaw": state["yaw"],
         "ax": state["ax"], "ay": state["ay"], "az": state["az"],
