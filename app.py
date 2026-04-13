@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """IMU2CV Web UI — configure and monitor IMU streaming from a browser.
 
-Tries BLE first; falls back to USB serial if no BLE device found.
+Supports BLE and USB transport, switchable at runtime via the web UI.
 """
 
 import json
@@ -21,9 +21,10 @@ from ble_transport import BLETransport
 app = Flask(__name__)
 
 REFRESH_HZ = 50
+SSE_HZ = 15  # UI updates don't need 50Hz
 RECONNECT_INTERVAL = 1.0
 FRAME_STALE_SEC = 2.0
-MODE = os.environ.get("IMU2CV_MODE", "auto").lower()  # "ble", "usb", or "auto"
+MODE = os.environ.get("IMU2CV_MODE", "auto").lower()
 
 state = {
     "imu_connected": False,
@@ -35,7 +36,7 @@ state = {
     "ax": 0.0, "ay": 0.0, "az": 0.0,
     "transport": "",
     "ble_connecting": False,
-    "mode": "ble",  # "ble" or "usb"
+    "mode": "ble",
 }
 
 _ble: Optional[BLETransport] = None
@@ -46,6 +47,34 @@ _stop_event = threading.Event()
 _usb_stop = threading.Event()
 _sse_clients: list[Queue] = []
 
+
+# ---------------------------------------------------------------------------
+# UDP send — shared by both transports
+# ---------------------------------------------------------------------------
+
+def _send_udp(pitch, roll, yaw, ax, ay, az):
+    """Fire a UDP packet immediately. Called from whichever transport has data."""
+    sock = _udp_sock
+    if not sock:
+        return
+    sending = state["sending"]
+    target_ip = state["target_ip"]
+    target_port = state["target_port"]
+    if not (sending and target_ip):
+        return
+    seq = state["seq"]
+    try:
+        packet = struct.pack("<Idffffff", seq, time.time(),
+                             pitch, roll, yaw, ax, ay, az)
+        sock.sendto(packet, (target_ip, target_port))
+        state["seq"] = seq + 1
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# SSE broadcast — throttled independently from data rate
+# ---------------------------------------------------------------------------
 
 def _broadcast_sse(data: dict):
     msg = f"data: {json.dumps(data)}\n\n"
@@ -59,6 +88,77 @@ def _broadcast_sse(data: dict):
         _sse_clients.remove(q)
 
 
+def _sse_loop():
+    """Broadcast state to web UI at SSE_HZ (lower than data rate)."""
+    while not _stop_event.is_set():
+        _broadcast_sse({
+            "pitch": state["pitch"], "roll": state["roll"], "yaw": state["yaw"],
+            "ax": state["ax"], "ay": state["ay"], "az": state["az"],
+            "imu_connected": state["imu_connected"],
+            "sending": state["sending"],
+            "target_ip": state["target_ip"],
+            "target_port": state["target_port"],
+            "seq": state["seq"],
+            "transport": state["transport"],
+            "ble_connecting": state.get("ble_connecting", False),
+            "mode": state.get("mode", "ble"),
+        })
+        time.sleep(1.0 / SSE_HZ)
+
+
+# ---------------------------------------------------------------------------
+# BLE callback — fires on every notification, sends UDP immediately
+# ---------------------------------------------------------------------------
+
+def _on_ble_data(parser: WT901Parser):
+    """Called directly from BLE notification — no polling delay."""
+    if state["mode"] != "ble":
+        return
+    p = parser
+    pitch, roll, yaw = p.pitch, p.roll, p.yaw
+    ax, ay, az = p.ax, p.ay, p.az
+
+    state["imu_connected"] = True
+    state["pitch"] = round(pitch, 2)
+    state["roll"] = round(roll, 2)
+    state["yaw"] = round(yaw, 2)
+    state["ax"] = round(ax, 3)
+    state["ay"] = round(ay, 3)
+    state["az"] = round(az, 3)
+
+    _send_udp(pitch, roll, yaw, ax, ay, az)
+
+
+def _ble_status_loop(ble: BLETransport):
+    """Lightweight loop — only updates connection status, not IMU values."""
+    state["transport"] = "BLE (disconnected)"
+
+    while not _stop_event.is_set():
+        if state["mode"] != "ble":
+            state["ble_connecting"] = False
+            time.sleep(0.2)
+            continue
+
+        state["ble_connecting"] = ble.connecting
+        if ble.connected:
+            state["transport"] = f"BLE ({ble.device_name or ble.device_addr})"
+            # Mark stale if no data recently
+            if ble.last_data_age > FRAME_STALE_SEC:
+                state["imu_connected"] = False
+        elif ble.connecting:
+            state["transport"] = "BLE (scanning...)"
+            state["imu_connected"] = False
+        else:
+            state["transport"] = "BLE (disconnected)"
+            state["imu_connected"] = False
+
+        time.sleep(0.2)  # Status checks don't need high frequency
+
+
+# ---------------------------------------------------------------------------
+# USB loop — polls serial at REFRESH_HZ
+# ---------------------------------------------------------------------------
+
 def _imu_loop_usb():
     """USB serial transport loop. Stops when _usb_stop is set."""
     ser = None
@@ -67,11 +167,9 @@ def _imu_loop_usb():
     last_reconnect = 0.0
     serial_open = False
 
-    with _lock:
-        state["transport"] = "USB (scanning...)"
+    state["transport"] = "USB (scanning...)"
 
     while not _stop_event.is_set() and not _usb_stop.is_set():
-        # Skip if we're not the active mode (no lock needed, just a dict read)
         if state["mode"] != "usb":
             time.sleep(0.1)
             continue
@@ -86,8 +184,7 @@ def _imu_loop_usb():
                     parser = WT901Parser()
                     last_frame = 0.0
                     serial_open = True
-                    with _lock:
-                        state["transport"] = f"USB ({ser.port})"
+                    state["transport"] = f"USB ({ser.port})"
 
         pitch = roll = yaw = 0.0
         ax = ay = az = 0.0
@@ -110,7 +207,16 @@ def _imu_loop_usb():
                 last_reconnect = time.time()
 
         imu_ok = serial_open and last_frame > 0 and (now - last_frame <= FRAME_STALE_SEC)
-        _update_state(imu_ok, pitch, roll, yaw, ax, ay, az)
+
+        state["imu_connected"] = imu_ok
+        state["pitch"] = round(pitch, 2)
+        state["roll"] = round(roll, 2)
+        state["yaw"] = round(yaw, 2)
+        state["ax"] = round(ax, 3)
+        state["ay"] = round(ay, 3)
+        state["az"] = round(az, 3)
+
+        _send_udp(pitch, roll, yaw, ax, ay, az)
         time.sleep(1.0 / REFRESH_HZ)
 
     # Clean up serial on exit
@@ -119,78 +225,12 @@ def _imu_loop_usb():
             ser.close()
         except Exception:
             pass
-    with _lock:
-        state["imu_connected"] = False
+    state["imu_connected"] = False
 
 
-def _ble_state_poller(ble: BLETransport):
-    """Background thread that reads BLE parser and updates shared state."""
-    with _lock:
-        state["transport"] = "BLE (disconnected)"
-
-    while not _stop_event.is_set():
-        # Skip if we're not the active mode (no lock needed, just a dict read)
-        if state["mode"] != "ble":
-            state["ble_connecting"] = False
-            time.sleep(0.1)
-            continue
-
-        p = ble.parser
-        pitch, roll, yaw = p.pitch, p.roll, p.yaw
-        ax, ay, az = p.ax, p.ay, p.az
-        imu_ok = ble.connected and ble.last_data_age <= FRAME_STALE_SEC
-
-        with _lock:
-            state["ble_connecting"] = ble.connecting
-            if ble.connected:
-                state["transport"] = f"BLE ({ble.device_name or ble.device_addr})"
-            elif ble.connecting:
-                state["transport"] = "BLE (scanning...)"
-            else:
-                state["transport"] = "BLE (disconnected)"
-
-        _update_state(imu_ok, pitch, roll, yaw, ax, ay, az)
-        time.sleep(1.0 / REFRESH_HZ)
-
-
-def _update_state(imu_ok, pitch, roll, yaw, ax, ay, az):
-    global _udp_sock
-    with _lock:
-        state["imu_connected"] = imu_ok
-        state["pitch"] = round(pitch, 2)
-        state["roll"] = round(roll, 2)
-        state["yaw"] = round(yaw, 2)
-        state["ax"] = round(ax, 3)
-        state["ay"] = round(ay, 3)
-        state["az"] = round(az, 3)
-        sending = state["sending"]
-        target_ip = state["target_ip"]
-        target_port = state["target_port"]
-        seq = state["seq"]
-
-    if sending and target_ip and _udp_sock:
-        try:
-            packet = struct.pack("<Idffffff", seq, time.time(),
-                                 pitch, roll, yaw, ax, ay, az)
-            _udp_sock.sendto(packet, (target_ip, target_port))
-            state["seq"] = seq + 1
-        except Exception:
-            pass
-
-    # Snapshot for SSE — no lock needed, values are already written
-    _broadcast_sse({
-        "pitch": state["pitch"], "roll": state["roll"], "yaw": state["yaw"],
-        "ax": state["ax"], "ay": state["ay"], "az": state["az"],
-        "imu_connected": state["imu_connected"],
-        "sending": state["sending"],
-        "target_ip": state["target_ip"],
-        "target_port": state["target_port"],
-        "seq": state["seq"],
-        "transport": state["transport"],
-        "ble_connecting": state.get("ble_connecting", False),
-        "mode": state.get("mode", "ble"),
-    })
-
+# ---------------------------------------------------------------------------
+# Flask routes
+# ---------------------------------------------------------------------------
 
 @app.route("/")
 def index():
@@ -199,8 +239,7 @@ def index():
 
 @app.route("/api/state")
 def get_state():
-    with _lock:
-        return jsonify(state)
+    return jsonify(state)
 
 
 @app.route("/api/start", methods=["POST"])
@@ -211,11 +250,10 @@ def start_sending():
     port = int(data.get("port", 9000))
     if not ip:
         return jsonify({"error": "IP is required"}), 400
-    with _lock:
-        state["target_ip"] = ip
-        state["target_port"] = port
-        state["seq"] = 0
-        state["sending"] = True
+    state["target_ip"] = ip
+    state["target_port"] = port
+    state["seq"] = 0
+    state["sending"] = True
     if _udp_sock is None:
         _udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         if ip == "255.255.255.255":
@@ -226,8 +264,7 @@ def start_sending():
 @app.route("/api/stop", methods=["POST"])
 def stop_sending():
     global _udp_sock
-    with _lock:
-        state["sending"] = False
+    state["sending"] = False
     if _udp_sock:
         _udp_sock.close()
         _udp_sock = None
@@ -242,8 +279,7 @@ def set_mode():
     if new_mode not in ("ble", "usb"):
         return jsonify({"error": "mode must be 'ble' or 'usb'"}), 400
 
-    with _lock:
-        current = state["mode"]
+    current = state["mode"]
     if new_mode == current:
         return jsonify({"ok": True, "mode": new_mode})
 
@@ -255,18 +291,16 @@ def set_mode():
 
     # Start new mode
     if new_mode == "ble":
-        _usb_stop.set()  # ensure USB is stopped
-        with _lock:
-            state["mode"] = "ble"
-            state["transport"] = "BLE (disconnected)"
-            state["imu_connected"] = False
+        _usb_stop.set()
+        state["mode"] = "ble"
+        state["transport"] = "BLE (disconnected)"
+        state["imu_connected"] = False
     elif new_mode == "usb":
         if _ble is not None:
             _ble.disconnect()
         _usb_stop.clear()
         threading.Thread(target=_imu_loop_usb, daemon=True).start()
-        with _lock:
-            state["mode"] = "usb"
+        state["mode"] = "usb"
 
     return jsonify({"ok": True, "mode": new_mode})
 
@@ -275,9 +309,8 @@ def set_mode():
 def ble_connect():
     if _ble is None:
         return jsonify({"error": "BLE not available"}), 400
-    with _lock:
-        if state["mode"] != "ble":
-            return jsonify({"error": "Switch to BLE mode first"}), 400
+    if state["mode"] != "ble":
+        return jsonify({"error": "Switch to BLE mode first"}), 400
     if _ble.connected:
         return jsonify({"error": "Already connected"}), 400
     _ble.connect()
@@ -313,16 +346,22 @@ def stream():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
+    # SSE broadcast runs in its own thread at a lower rate
+    threading.Thread(target=_sse_loop, daemon=True).start()
+
     if MODE in ("ble", "auto"):
-        _ble = BLETransport()
-        # State poller in background thread
-        threading.Thread(target=_ble_state_poller, args=(_ble,), daemon=True).start()
+        _ble = BLETransport(on_data=_on_ble_data)
+        # Lightweight status poller (connection state only, not IMU values)
+        threading.Thread(target=_ble_status_loop, args=(_ble,), daemon=True).start()
         # Flask in background thread
         threading.Thread(target=lambda: app.run(host="0.0.0.0", port=2323, threaded=True),
                          daemon=True).start()
         # BLE event loop in main thread (BlueZ/D-Bus requirement)
-        # Does NOT auto-connect — user must click Connect in the UI
         try:
             _ble.run_forever()
         except KeyboardInterrupt:

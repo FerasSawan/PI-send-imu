@@ -33,7 +33,8 @@ class BLETransport:
     Read .parser, .connected, .last_data_age from any thread.
     """
 
-    def __init__(self, target_name: Optional[str] = None, target_addr: Optional[str] = None):
+    def __init__(self, target_name: Optional[str] = None, target_addr: Optional[str] = None,
+                 on_data=None):
         self._target_name = target_name
         self._target_addr = target_addr
         self.parser = WT901Parser()
@@ -48,6 +49,7 @@ class BLETransport:
         self._connect_requested = False
         self._disconnect_requested = False
         self._client: Optional[BleakClient] = None
+        self._on_data = on_data  # callback(parser) fired on every BLE notification
 
     @property
     def last_data_age(self) -> float:
@@ -148,3 +150,5 @@ class BLETransport:
             self.parser.buf.extend(data)
             self.parser.drain_buf()
             self._last_data_time = time.time()
+        if self._on_data:
+            self._on_data(self.parser)
